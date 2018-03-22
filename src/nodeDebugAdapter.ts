@@ -2,17 +2,17 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {ChromeDebugAdapter, chromeUtils, ISourceMapPathOverrides, utils as CoreUtils, logger, telemetry as CoreTelemetry, ISetBreakpointResult, ISetBreakpointsArgs, Crdp, InternalSourceBreakpoint} from 'vscode-chrome-debug-core';
+import { ChromeDebugAdapter, TimeTravelRuntime, chromeUtils, ISourceMapPathOverrides, utils as CoreUtils, logger, telemetry as CoreTelemetry, ISetBreakpointResult, ISetBreakpointsArgs, Crdp, InternalSourceBreakpoint } from 'vscode-chrome-debug-core';
 const telemetry = CoreTelemetry.telemetry;
 
-import {DebugProtocol} from 'vscode-debugprotocol';
-import {OutputEvent, CapabilitiesEvent} from 'vscode-debugadapter';
+import { DebugProtocol } from 'vscode-debugprotocol';
+import { OutputEvent, CapabilitiesEvent } from 'vscode-debugadapter';
 
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 
-import {ILaunchRequestArguments, IAttachRequestArguments, ICommonRequestArgs} from './nodeDebugInterfaces';
+import { ILaunchRequestArguments, IAttachRequestArguments, ICommonRequestArgs } from './nodeDebugInterfaces';
 import * as pathUtils from './pathUtils';
 import * as utils from './utils';
 import * as errors from './errors';
@@ -27,6 +27,11 @@ const DefaultSourceMapPathOverrides: ISourceMapPathOverrides = {
     'webpack:///*': '*',
     'meteor://💻app/*': '${cwd}/*',
 };
+
+////////////////
+//Overrides for Time-travel node adapter -- can refactor into extension that extends node2?
+import * as FSExtra from 'fs-extra';
+////////////////
 
 export class NodeDebugAdapter extends ChromeDebugAdapter {
     private static NODE = 'node';
@@ -54,6 +59,82 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
     private _restartMode: boolean;
     private _isTerminated: boolean;
     private _adapterID: string;
+
+
+    ////////////////
+    //Overrides for Time-travel node adapter -- can refactor into extension that extends node2?
+
+    private _pendingTTDLaunch: boolean = false;
+    private _runtimeArgsForTTD: string[];
+    private _runtimeExecutableForTTD: string;
+    private _programPathForTTD: string;
+
+    private isTTDLiveMode(): boolean {
+        const liveFlag = this._runtimeArgsForTTD.some((param) => param.startsWith("--tt-debug"));
+        const replayFlag = this._runtimeArgsForTTD.every((param) => param.startsWith("--replay-debug"))
+        return this._runtimeExecutableForTTD && liveFlag && !replayFlag;
+    }
+
+    private getLogDirectory(): string {
+        return path.join(path.dirname(this._programPathForTTD), "_ttd_log_");
+    }
+
+    private makeReplayConfig(tracingDir: string): string {
+        return JSON.stringify({
+            "type": "node",
+            "request": "launch",
+            "name": "TTDReplay",
+            "protocol": "inspector",
+            "stopOnEntry": true,
+            "runtimeExecutable": this._runtimeExecutableForTTD,
+            "runtimeArgs": [
+                "--nolazy",
+                `--replay-debug=${tracingDir}`
+            ],
+            "console": "internalConsole"
+        });
+    }
+
+    private launchSetupForReverseExecution(): Promise<void | string> {
+        if (this._pendingTTDLaunch) {
+            return Promise.resolve(null);
+        }
+
+        this._pendingTTDLaunch = true;
+        const logDir = this.getLogDirectory();
+
+        return FSExtra.emptyDir(logDir)
+            .then(() => {
+                return (<TimeTravelRuntime>this.chrome).TimeTravel.writeTTDLog({ uri: logDir });
+            })
+            .then(() => {
+                this._pendingTTDLaunch = false;
+                return this.makeReplayConfig(logDir);
+            })
+            .catch((ex) => console.log(ex));
+    }
+
+    public stepBack(): Promise<void> {
+        if (this.isTTDLiveMode()) {
+            return this.launchSetupForReverseExecution() as undefined; //force types to be compatible with a hack
+        } else {
+            return (<TimeTravelRuntime>this.chrome).TimeTravel.stepBack()
+                .then(() => { /* make void */ },
+                    e => { /* ignore failures - client can send the request when the target is no longer paused */ });
+        }
+    }
+
+    public reverseContinue(): Promise<void> {
+        if (this.isTTDLiveMode()) {
+            return this.launchSetupForReverseExecution() as undefined; //force types to be compatible with a hack
+        } else {
+            return (<TimeTravelRuntime>this.chrome).TimeTravel.reverse()
+                .then(() => { /* make void */ },
+                    e => { /* ignore failures - client can send the request when the target is no longer paused */ });
+        }
+    }
+
+    ////////////////
 
     /**
      * Returns whether this is a non-EH attach scenario
@@ -163,6 +244,13 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
         }
 
         this._captureFromStd = args.outputCapture === 'std';
+
+        ////
+        //TTD support
+        this._runtimeArgsForTTD = args.runtimeArgs || [];
+        this._runtimeExecutableForTTD = args.runtimeExecutable;
+        this._programPathForTTD = programPath;
+        ////
 
         return this.resolveProgramPath(programPath, args.sourceMaps).then(resolvedProgramPath => {
             let program: string;
@@ -365,7 +453,7 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
             });
 
             resolve();
-         });
+        });
     }
 
     private captureStderr(nodeProcess: cp.ChildProcess, noDebugMode: boolean): void {
@@ -492,7 +580,7 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
     public async terminateSession(reason: string, args?: DebugProtocol.DisconnectArguments): Promise<void> {
         if (this.isExtensionHost() && args && typeof (<any>args).restart === 'boolean' && (<any>args).restart) {
             this._nodeProcessId = 0;
-        } else if (this._restartMode && !args)  {
+        } else if (this._restartMode && !args) {
             // If restart: true, only kill the process when the client has disconnected. 'args' present implies that a Disconnect request was received
             this._nodeProcessId = 0;
         }
@@ -683,7 +771,7 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
                 telemetry.reportEvent('nodeVersion', { version });
             }
         },
-        error => logger.error('Error evaluating `process.pid`: ' + error.message));
+            error => logger.error('Error evaluating `process.pid`: ' + error.message));
     }
 
     private startPollingForNodeTermination(): void {
@@ -798,7 +886,7 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
 
 function getSourceMapPathOverrides(cwd: string, sourceMapPathOverrides?: ISourceMapPathOverrides): ISourceMapPathOverrides {
     return sourceMapPathOverrides ? resolveCwdPattern(cwd, sourceMapPathOverrides, /*warnOnMissing=*/true) :
-            resolveCwdPattern(cwd, DefaultSourceMapPathOverrides, /*warnOnMissing=*/false);
+        resolveCwdPattern(cwd, DefaultSourceMapPathOverrides, /*warnOnMissing=*/false);
 }
 
 function fixNodeInternalsSkipFiles(args: ICommonRequestArgs): void {

@@ -16,7 +16,9 @@
   "dependencies": {
     "vscode-chrome-debug-core": "^3.23.8",
     "vscode-debugadapter": "^1.28.0-pre.2",
-    "vscode-nls": "^3.2.1"
+    "vscode-nls": "^3.2.1",
+    "fs-extra": "5.0.0",
+    "@types/fs-extra": "5.0.1"
   },
   "devDependencies": {
     "@types/mocha": "^2.2.47",
