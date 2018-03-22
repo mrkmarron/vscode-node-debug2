@@ -81,23 +81,27 @@ export class NodeDebugAdapter extends ChromeDebugAdapter {
 
     private makeReplayConfig(tracingDir: string): string {
         return JSON.stringify({
-            "type": "node",
-            "request": "launch",
-            "name": "TTDReplay",
-            "protocol": "inspector",
-            "stopOnEntry": true,
-            "runtimeExecutable": this._runtimeExecutableForTTD,
-            "runtimeArgs": [
-                "--nolazy",
-                `--replay-debug=${tracingDir}`
-            ],
-            "console": "internalConsole"
+            "launch": true,
+            config: {
+                "type": "node",
+                "request": "launch",
+                "name": "TTDReplay",
+                "protocol": "inspector",
+                "stopOnEntry": true,
+                "runtimeExecutable": this._runtimeExecutableForTTD,
+                "runtimeArgs": [
+                    "--nolazy",
+                    `--replay-debug=${tracingDir}`
+                ],
+                "console": "internalConsole",
+                "timeout": 30000
+            }
         });
     }
 
     private launchSetupForReverseExecution(): Promise<void | string> {
         if (this._pendingTTDLaunch) {
-            return Promise.resolve(null);
+            return Promise.resolve(JSON.stringify({ "launch": false }));
         }
 
         this._pendingTTDLaunch = true;
